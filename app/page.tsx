@@ -137,10 +137,14 @@ export default function Home() {
           REAL-WORLD ENGINEERING
         </div>
         <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold tracking-tight mb-6">
-          Algorithms in Production.
+         See Why Algorithms Exist
         </h1>
-        <p className="text-zinc-400 text-lg max-w-xl mb-8 leading-relaxed">
-          Move beyond theoretical constraints. Explore how core algorithms power scalable systems like rate limiters, load balancers, and search engines.
+        <p className="text-zinc-400 text-lg max-w-xl mb-4 leading-relaxed">
+          Demystifying data structures through real-world applications. See algorithms come alive.
+          Interactive playgrounds that show how data structures solve real problems from rate limiters to search engines."
+        </p>
+        <p className="text-zinc-500 text-sm mb-8 italic">
+          Built for builders, not grinders.
         </p>
         <div className="flex flex-wrap gap-4">
           <Link
