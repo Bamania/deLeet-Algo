@@ -110,6 +110,26 @@ const problemDomains = [
 export default function Home() {
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white font-sans">
+      {/* Navbar */}
+      <header className="border-b border-zinc-800/50">
+        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+          <Link href="/" className="flex items-center gap-2 text-white font-semibold">
+            <div className="w-7 h-7 bg-orange-500 rounded flex items-center justify-center text-xs font-bold">
+              de
+            </div>
+            <span>deLeet algo</span>
+          </Link>
+          <a 
+            href="https://github.com" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="text-zinc-400 hover:text-white transition-colors"
+          >
+            <GitHubIcon />
+          </a>
+        </div>
+      </header>
+
       {/* Hero Section */}
       <section className="max-w-6xl mx-auto px-6 py-20">
         <div className="inline-flex items-center gap-2 bg-zinc-800/50 text-orange-400 text-xs font-medium px-3 py-1.5 rounded-full mb-6">
@@ -129,12 +149,6 @@ export default function Home() {
           >
             Explore Patterns
           </Link>
-          {/* <Link
-            href="#"
-            className="bg-zinc-800 hover:bg-zinc-700 text-white px-6 py-3 rounded-lg font-medium transition-colors border border-zinc-700"
-          >
-            View Documentation
-          </Link> */}
         </div>
       </section>
 
