@@ -1,461 +1,448 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-// @ts-ignore
-import { ChevronRight, RotateCcw, Zap } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import Link from 'next/link';
 
-interface Request {
+interface LogEntry {
   id: string;
-  timestamp: number;
-  allowed: boolean;
+  timestamp: string;
+  status: 'ok' | 'error';
+  message: string;
+  retryIn?: number;
+  latency?: number;
 }
 
-export default function SlidingWindow() {
-  const [mode, setMode] = useState<'fixed' | 'sliding'>('fixed');
-  const [currentTime, setCurrentTime] = useState(0);
-  const [windowSize, setWindowSize] = useState(60);
-  const [maxRequests, setMaxRequests] = useState(5);
-  const [requests, setRequests] = useState<Request[]>([]);
-  const [insight, setInsight] = useState('Ready to send requests.');
+// Icons
+const SearchIcon = () => (
+  <svg className="w-4 h-4 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+  </svg>
+);
 
-  // Calculate allowed/blocked counts based on algorithm
-  const getAlgorithmStats = useCallback(() => {
-    if (mode === 'fixed') {
-      // Fixed counter: resets every windowSize seconds
-      const lastResetTime = Math.floor(currentTime / windowSize) * windowSize;
-      const requestsInCurrentWindow = requests.filter(
-        (r) => r.timestamp >= lastResetTime && r.timestamp < lastResetTime + windowSize
-      );
-      return {
-        allowed: requestsInCurrentWindow.filter((r) => r.allowed).length,
-        blocked: requestsInCurrentWindow.filter((r) => !r.allowed).length,
-        requestsInWindow: requestsInCurrentWindow,
-      };
-    } else {
-      // Sliding window: tracks last windowSize seconds
-      const windowStart = Math.max(0, currentTime - windowSize);
-      const requestsInWindow = requests.filter(
-        (r) => r.timestamp >= windowStart && r.timestamp <= currentTime
-      );
-      return {
-        allowed: requestsInWindow.filter((r) => r.allowed).length,
-        blocked: requestsInWindow.filter((r) => !r.allowed).length,
-        requestsInWindow: requestsInWindow,
-      };
-    }
-  }, [mode, currentTime, windowSize, requests, maxRequests]);
+const TerminalIcon = () => (
+  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+  </svg>
+);
 
-  const stats = getAlgorithmStats();
+const ChevronDownIcon = ({ className = "" }: { className?: string }) => (
+  <svg className={`w-4 h-4 ${className}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+  </svg>
+);
 
-  // Send single request
-  const sendRequest = useCallback(() => {
-    const newRequest: Request = {
-      id: `${Date.now()}-${Math.random()}`,
-      timestamp: currentTime,
-      allowed: stats.allowed < maxRequests,
+const ChevronUpIcon = ({ className = "" }: { className?: string }) => (
+  <svg className={`w-4 h-4 ${className}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+  </svg>
+);
+
+const TokenIcon = () => (
+  <svg className="w-6 h-6 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+  </svg>
+);
+
+const DropletIcon = () => (
+  <svg className="w-5 h-5 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707" />
+  </svg>
+);
+
+export default function RateLimiter() {
+  const [bucketCapacity, setBucketCapacity] = useState(10);
+  const [refillRate, setRefillRate] = useState(1);
+  const [availableTokens, setAvailableTokens] = useState(10);
+  const [nextRefill, setNextRefill] = useState(1.0);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [okCount, setOkCount] = useState(0);
+  const [limitedCount, setLimitedCount] = useState(0);
+  const [strategy, setStrategy] = useState<'token-bucket' | 'leaky-bucket'>('token-bucket');
+  const [expandedAlgorithm, setExpandedAlgorithm] = useState<'token' | 'leaky' | null>('token');
+  const [isLoading, setIsLoading] = useState(false);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+  const startTimeRef = useRef(Date.now());
+
+  // Format timestamp
+  const getTimestamp = () => {
+    const elapsed = (Date.now() - startTimeRef.current) / 1000;
+    const hours = Math.floor(elapsed / 3600);
+    const minutes = Math.floor((elapsed % 3600) / 60);
+    const seconds = elapsed % 60;
+    return `${String(10 + hours).padStart(2, '0')}:${String(42 + minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0').slice(0, 6)}`;
+  };
+
+  // Initialize log
+  useEffect(() => {
+    const initLog: LogEntry = {
+      id: 'init',
+      timestamp: '10:42:01.002',
+      status: 'ok',
+      message: `INFO TokenLimiter initialized. Capacity: ${bucketCapacity}, Rate: ${refillRate}/s`,
+    };
+    setLogs([initLog]);
+    startTimeRef.current = Date.now();
+  }, []);
+
+  // Poll the API to get current token status
+  useEffect(() => {
+    const fetchStatus = async () => {
+      try {
+        const response = await fetch('/api/window', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ count: bucketCapacity, duration: bucketCapacity / refillRate }),
+        });
+        const data = await response.json();
+        if (data.capacity !== undefined) {
+          setAvailableTokens(data.capacity);
+        }
+        
+        // Use the server-calculated time until next token
+        if (data.timeUntilNextToken !== undefined) {
+          setNextRefill(data.timeUntilNextToken > 0 ? data.timeUntilNextToken : 0);
+        }
+      } catch (error) {
+        console.error('Failed to fetch token status:', error);
+      }
     };
 
-    setRequests((prev) => [...prev, newRequest]);
+    // Fetch immediately on mount
+    fetchStatus();
+    
+    // Then poll every 200ms for smoother UI
+    const interval = setInterval(fetchStatus, 200);
 
-    if (newRequest.allowed) {
-      setInsight('✓ Request allowed.');
-    } else {
-      setInsight(`✗ Blocked: window contains ${stats.allowed} requests.`);
-    }
-  }, [currentTime, stats.allowed, maxRequests]);
+    return () => clearInterval(interval);
+  }, [bucketCapacity, refillRate]);
 
-  // Send 5 burst requests
-  const sendBurst = useCallback(() => {
-    let allowedCount = 0;
-    let blockedCount = 0;
-    const newRequests: Request[] = [];
-
-    for (let i = 0; i < 5; i++) {
-      const isAllowed = allowedCount < maxRequests;
-      newRequests.push({
-        id: `${Date.now()}-${i}-${Math.random()}`,
-        timestamp: currentTime + i * 0.1,
-        allowed: isAllowed,
-      });
-      if (isAllowed) allowedCount++;
-      else blockedCount++;
-    }
-
-    setRequests((prev) => [...prev, ...newRequests]);
-    if (blockedCount > 0) {
-      setInsight(`Burst sent: ${allowedCount} allowed, ${blockedCount} blocked.`);
-    } else {
-      setInsight('Burst sent: all 5 requests allowed.');
-    }
-  }, [currentTime, maxRequests]);
-
-  // Advance time
-  const advanceTime = useCallback((seconds: number) => {
-    setCurrentTime((prev) => prev + seconds);
-    setInsight(`⏱ Time advanced by ${seconds}s.`);
-  }, []);
-
-  // Reset simulation
-  const reset = useCallback(() => {
-    setCurrentTime(0);
-    setRequests([]);
-    setInsight('Simulation reset.');
-  }, []);
-
-  // Auto-fade old requests
+  // Auto-scroll logs
   useEffect(() => {
-    if (mode === 'sliding') {
-      const windowStart = Math.max(0, currentTime - windowSize);
-      setRequests((prev) =>
-        prev.filter((r) => r.timestamp >= windowStart - 5) // Keep 5s grace period for animation
-      );
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
+
+  // Send request to the REAL API using your TokenLimiter class!
+  const sendRequest = useCallback(async () => {
+    if (isLoading) return;
+    
+    setIsLoading(true);
+    const timestamp = getTimestamp();
+    const startTime = Date.now();
+
+    try {
+      // Call the real API endpoint which uses your TokenLimiter class from lib/rateLimiter
+      const response = await fetch('/api/window', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          count: bucketCapacity, 
+          duration: bucketCapacity / refillRate // duration based on refill rate
+        }),
+      });
+
+      const data = await response.json();
+      const latency = Date.now() - startTime;
+
+      // Update available tokens from server response
+      setAvailableTokens(data.capacity);
+
+      if (response.ok) {
+        setOkCount((prev) => prev + 1);
+        setLogs((prev) => [
+          ...prev,
+          {
+            id: `${Date.now()}-${Math.random()}`,
+            timestamp,
+            status: 'ok',
+            message: 'POST /api/window',
+            latency,
+          },
+        ]);
+      } else {
+        setLimitedCount((prev) => prev + 1);
+        setLogs((prev) => [
+          ...prev,
+          {
+            id: `${Date.now()}-${Math.random()}`,
+            timestamp,
+            status: 'error',
+            message: 'Rate limit exceeded',
+            retryIn: data.retryIn,
+          },
+        ]);
+      }
+    } catch (error) {
+      console.error('API request failed:', error);
+      setLogs((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-${Math.random()}`,
+          timestamp,
+          status: 'error',
+          message: 'Network error',
+        },
+      ]);
+    } finally {
+      setIsLoading(false);
     }
-  }, [currentTime, windowSize, mode]);
-
-  // Timeline visualization
-  const timelineStart = Math.max(0, currentTime - windowSize - 10);
-  const timelineEnd = currentTime + 10;
-  const timelineLength = timelineEnd - timelineStart;
-
-  const getRequestPosition = (timestamp: number) => {
-    return ((timestamp - timelineStart) / timelineLength) * 100;
-  };
-
-  const getWindowStart = () => {
-    if (mode === 'fixed') {
-      const lastResetTime = Math.floor(currentTime / windowSize) * windowSize;
-      return ((lastResetTime - timelineStart) / timelineLength) * 100;
-    } else {
-      return ((Math.max(0, currentTime - windowSize) - timelineStart) / timelineLength) * 100;
-    }
-  };
-
-  const windowStartPercent = getWindowStart();
-  const windowEndPercent = ((currentTime - timelineStart) / timelineLength) * 100;
+  }, [bucketCapacity, refillRate, isLoading]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-slate-100 p-6">
+    <div className="min-h-screen bg-[#0f1117] text-white font-sans">
       {/* Header */}
-      <div className="max-w-7xl mx-auto mb-8">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-4xl font-bold text-slate-900 mb-2">Sliding Window</h1>
-            <p className="text-slate-600">
-              See why rate limiting needs sliding window, not just a counter.
-            </p>
+      <header className="border-b border-zinc-800">
+        <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-6">
+            <Link href="/" className="flex items-center gap-2 text-white font-semibold">
+              <div className="w-7 h-7 bg-orange-500 rounded flex items-center justify-center text-xs font-bold">
+                de
+              </div>
+              <span>deLeet algo</span>
+            </Link>
+            <div className="flex items-center gap-2 bg-zinc-800/50 rounded-lg px-3 py-2 text-sm text-zinc-500 w-48">
+              <SearchIcon />
+              <span>Search algorithms...</span>
+            </div>
           </div>
-          <div className="text-right">
-            <p className="text-sm text-slate-600">DeLeet Algo</p>
-            <p className="text-xs text-slate-500">Stop grinding. Start understanding.</p>
+          <div className="flex items-center gap-6">
+            <nav className="flex items-center gap-6 text-sm text-zinc-400">
+              <Link href="#" className="hover:text-white transition-colors">Algorithms</Link>
+              <Link href="#" className="hover:text-white transition-colors">Challenges</Link>
+              <Link href="#" className="text-white font-medium">Playground</Link>
+            </nav>
+            <button className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+              Sign In
+            </button>
           </div>
+        </div>
+      </header>
+
+      {/* Breadcrumb */}
+      <div className="max-w-7xl mx-auto px-6 py-4">
+        <div className="flex items-center gap-2 text-sm text-zinc-500">
+          <Link href="/" className="hover:text-white transition-colors">Home</Link>
+          <span>/</span>
+          <Link href="#" className="hover:text-white transition-colors">Algorithms</Link>
+          <span>/</span>
+          <span className="text-zinc-300">Rate Limiter</span>
         </div>
       </div>
 
-      {/* Main Three-Column Layout */}
-      <div className="max-w-7xl mx-auto grid grid-cols-3 gap-6">
-        {/* LEFT PANEL - Controls */}
-        <div className="bg-white rounded-2xl shadow-sm p-6 border border-slate-200">
-          <h2 className="text-lg font-semibold text-slate-900 mb-6">Attack Zone</h2>
-
-          {/* Algorithm Toggle */}
-          <div className="mb-8">
-            <label className="text-sm font-medium text-slate-700 block mb-3">
-              Algorithm Mode
-            </label>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setMode('fixed')}
-                className={`flex-1 px-4 py-2 rounded-lg font-medium transition-all ${
-                  mode === 'fixed'
-                    ? 'bg-red-500 text-white shadow-md'
-                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                }`}
-              >
-                Fixed Counter
-              </button>
-              <button
-                onClick={() => setMode('sliding')}
-                className={`flex-1 px-4 py-2 rounded-lg font-medium transition-all ${
-                  mode === 'sliding'
-                    ? 'bg-emerald-500 text-white shadow-md'
-                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                }`}
-              >
-                Sliding Window
-              </button>
-            </div>
-            <p className="text-xs text-slate-500 mt-2">
-              {mode === 'fixed'
-                ? 'Counter resets every period. Bursts slip through.'
-                : 'Tracks last N seconds. No escape.'}
+      {/* Main Content */}
+      <main className="max-w-7xl mx-auto px-6 pb-12">
+        {/* Title Section */}
+        <div className="flex items-start justify-between mb-8">
+          <div>
+            <h1 className="text-3xl font-bold mb-2">API Rate Limiter</h1>
+            <p className="text-zinc-400 max-w-xl">
+              Interactive playground to visualize rate limiting strategies. Simulates a high-traffic API
+              endpoint to demonstrate how requests are throttled under load.
             </p>
           </div>
-
-          {/* Request Buttons */}
-          <div className="space-y-2 mb-8">
-            <button
-              onClick={sendRequest}
-              className="w-full bg-blue-500 hover:bg-blue-600 text-white font-medium py-3 rounded-lg transition-all active:scale-95 shadow-sm"
-            >
-              Send Request
-            </button>
-            <button
-              onClick={sendBurst}
-              className="w-full bg-purple-500 hover:bg-purple-600 text-white font-medium py-3 rounded-lg transition-all active:scale-95 shadow-sm flex items-center justify-center gap-2"
-            >
-              <Zap size={16} />
-              Burst Requests (×5)
-            </button>
-          </div>
-
-          {/* Time Controls */}
-          <div className="mb-8">
-            <label className="text-sm font-medium text-slate-700 block mb-3">
-              Advance Time
-            </label>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => advanceTime(5)}
-                className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2 rounded-lg transition-all text-sm"
+          <div className="text-right">
+            <p className="text-xs text-zinc-500 mb-2">STRATEGY</p>
+            <div className="relative">
+              <select
+                value={strategy}
+                onChange={(e) => setStrategy(e.target.value as 'token-bucket' | 'leaky-bucket')}
+                className="appearance-none bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2.5 pr-10 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
               >
-                +5s
-              </button>
-              <button
-                onClick={() => advanceTime(10)}
-                className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2 rounded-lg transition-all text-sm"
-              >
-                +10s
-              </button>
-              <button
-                onClick={() => advanceTime(30)}
-                className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2 rounded-lg transition-all text-sm col-span-2"
-              >
-                +30s
-              </button>
+                <option value="token-bucket">Token Bucket</option>
+                <option value="leaky-bucket">Leaky Bucket</option>
+              </select>
+              <ChevronDownIcon className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
             </div>
           </div>
+        </div>
 
-          {/* Reset */}
-          <button
-            onClick={reset}
-            className="w-full bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium py-3 rounded-lg transition-all flex items-center justify-center gap-2 mb-8"
-          >
-            <RotateCcw size={16} />
-            Reset Simulation
-          </button>
+        {/* Two Column Layout */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-12">
+          {/* Left Panel - Configuration */}
+          <div className="bg-[#1a1d24] rounded-2xl p-6 border border-zinc-800">
+            <div className="flex items-center gap-2 mb-6 text-zinc-400">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+              <span className="font-medium">Configuration</span>
+            </div>
 
-          {/* Sliders */}
-          <div className="space-y-6">
-            <div>
-              <div className="flex justify-between items-center mb-2">
-                <label className="text-sm font-medium text-slate-700">Window Size</label>
-                <span className="text-sm font-semibold text-blue-600">{windowSize}s</span>
+            {/* Bucket Capacity Slider */}
+            <div className="mb-6">
+              <div className="flex justify-between items-center mb-3">
+                <label className="text-sm text-zinc-400">Bucket Capacity</label>
+                <span className="text-sm text-white font-medium">{bucketCapacity}</span>
               </div>
               <input
                 type="range"
-                min="20"
-                max="120"
-                step="10"
-                value={windowSize}
-                onChange={(e) => setWindowSize(Number(e.target.value))}
-                className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                min="1"
+                max="20"
+                value={bucketCapacity}
+                onChange={(e) => setBucketCapacity(Number(e.target.value))}
+                className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
               />
             </div>
 
-            <div>
-              <div className="flex justify-between items-center mb-2">
-                <label className="text-sm font-medium text-slate-700">Max Requests</label>
-                <span className="text-sm font-semibold text-emerald-600">{maxRequests}</span>
+            {/* Refill Rate Slider */}
+            <div className="mb-8">
+              <div className="flex justify-between items-center mb-3">
+                <label className="text-sm text-zinc-400">Refill Rate</label>
+                <span className="text-sm text-white font-medium">{refillRate} req / sec</span>
               </div>
               <input
                 type="range"
                 min="1"
                 max="10"
-                step="1"
-                value={maxRequests}
-                onChange={(e) => setMaxRequests(Number(e.target.value))}
-                className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                value={refillRate}
+                onChange={(e) => setRefillRate(Number(e.target.value))}
+                className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
               />
+            </div>
+
+            {/* Token Display */}
+            <div className="grid grid-cols-2 gap-4 mb-8">
+              <div className="bg-[#0f1117] rounded-xl p-4 border border-zinc-800 text-center">
+                <p className="text-xs text-zinc-500 mb-1">AVAILABLE TOKENS</p>
+                <p className="text-4xl font-bold text-cyan-400">{availableTokens}</p>
+                <p className="text-xs text-zinc-500 mt-1">of {bucketCapacity} capacity</p>
+              </div>
+              <div className="bg-[#0f1117] rounded-xl p-4 border border-zinc-800 text-center">
+                <p className="text-xs text-zinc-500 mb-1">NEXT REFILL</p>
+                <p className="text-4xl font-bold text-white">{nextRefill.toFixed(1)}s</p>
+                <p className="text-xs text-zinc-500 mt-1">auto-refilling</p>
+              </div>
+            </div>
+
+            {/* Send Request Button */}
+            <button
+              onClick={sendRequest}
+              className="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-medium py-4 rounded-xl transition-all active:scale-[0.98] flex flex-col items-center gap-1"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-lg">&gt;</span>
+                <span className="text-lg font-semibold">Send Request</span>
+              </div>
+              <span className="text-xs text-cyan-200/70">POST /api/v1/data</span>
+            </button>
+
+            {/* Stats */}
+            <div className="flex items-center justify-center gap-6 mt-6 text-sm">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-green-500"></div>
+                <span className="text-zinc-400">{okCount} OK</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-red-500"></div>
+                <span className="text-zinc-400">{limitedCount} Limited</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Panel - Server Logs */}
+          <div className="bg-[#1a1d24] rounded-2xl border border-zinc-800 overflow-hidden">
+            {/* Terminal Header */}
+            <div className="flex items-center justify-between px-4 py-3 bg-[#161921] border-b border-zinc-800">
+              <div className="flex items-center gap-2 text-zinc-400 text-sm">
+                <TerminalIcon />
+                <span>server_logs ~ zsh</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <div className="w-3 h-3 rounded-full bg-red-500"></div>
+                <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+                <div className="w-3 h-3 rounded-full bg-green-500"></div>
+              </div>
+            </div>
+
+            {/* Log Content */}
+            <div className="p-4 h-[340px] overflow-y-auto font-mono text-sm">
+              {logs.map((log) => (
+                <div key={log.id} className={`flex items-start gap-3 py-1 ${log.status === 'error' ? 'bg-red-500/5' : ''}`}>
+                  <span className="text-zinc-500 whitespace-nowrap">{log.timestamp}</span>
+                  {log.status === 'ok' && log.message.startsWith('POST') ? (
+                    <>
+                      <span className="bg-green-600 text-white text-xs px-1.5 py-0.5 rounded font-medium">200 OK</span>
+                      <span className="text-zinc-300">{log.message}</span>
+                      {log.latency && <span className="text-zinc-500 ml-auto">{log.latency}ms</span>}
+                    </>
+                  ) : log.status === 'error' ? (
+                    <>
+                      <span className="bg-red-600 text-white text-xs px-1.5 py-0.5 rounded font-medium">429 ERR</span>
+                      <span className="text-red-400">{log.message}</span>
+                      {log.retryIn && <span className="text-red-400/70 ml-auto">Try in {log.retryIn}s</span>}
+                    </>
+                  ) : (
+                    <span className="text-cyan-400">{log.message}</span>
+                  )}
+                </div>
+              ))}
+              <div className="flex items-center gap-2 py-1">
+                <span className="text-zinc-500">→</span>
+                <span className="w-2 h-4 bg-zinc-400 animate-pulse"></span>
+              </div>
+              <div ref={logsEndRef} />
             </div>
           </div>
         </div>
 
-        {/* CENTER PANEL - Visualization */}
-        <div className="bg-white rounded-2xl shadow-sm p-6 border border-slate-200">
-          <h2 className="text-lg font-semibold text-slate-900 mb-6">Aha Zone</h2>
-
-          {/* Timeline Container */}
-          <div className="space-y-6">
-            {/* Time Labels */}
-            <div className="text-xs text-slate-500 flex justify-between px-1">
-              <span>{Math.max(0, Math.floor(timelineStart))}s</span>
-              <span>{Math.floor(currentTime)}s (now)</span>
-              <span>{Math.ceil(timelineEnd)}s</span>
-            </div>
-
-            {/* Timeline Track */}
-            <div className="relative h-64 bg-gradient-to-r from-slate-50 to-slate-100 rounded-xl border border-slate-200 overflow-hidden">
-              {/* Window Background Highlight */}
-              <div
-                className={`absolute top-0 bottom-0 transition-all ${
-                  mode === 'fixed' ? 'bg-red-50' : 'bg-emerald-50'
-                }`}
-                style={{
-                  left: `${windowStartPercent}%`,
-                  width: `${Math.max(0, windowEndPercent - windowStartPercent)}%`,
-                }}
-              />
-
-              {/* Window Border */}
-              <div
-                className={`absolute top-0 bottom-0 border-l-2 transition-all ${
-                  mode === 'fixed' ? 'border-red-300' : 'border-emerald-300'
-                }`}
-                style={{ left: `${windowStartPercent}%` }}
-              />
-              <div
-                className={`absolute top-0 bottom-0 border-r-2 transition-all ${
-                  mode === 'fixed' ? 'border-red-400' : 'border-emerald-400'
-                }`}
-                style={{ left: `${windowEndPercent}%` }}
-              />
-
-              {/* Request Dots */}
-              <div className="absolute inset-0 flex items-center">
-                {requests.map((req) => {
-                  const position = getRequestPosition(req.timestamp);
-                  const isInWindow =
-                    position >= windowStartPercent && position <= windowEndPercent;
-                  const isExpired = req.timestamp < timelineStart;
-
-                  return (
-                    <div
-                      key={req.id}
-                      className={`absolute w-3 h-3 rounded-full transition-all ${
-                        isExpired
-                          ? 'opacity-10 bg-slate-400'
-                          : req.allowed
-                            ? 'opacity-100 bg-emerald-500 shadow-lg'
-                            : 'opacity-100 bg-red-500 shadow-lg'
-                      }`}
-                      style={{
-                        left: `calc(${position}% - 6px)`,
-                        top: `${20 + (Math.random() * 60)}px`,
-                      }}
-                      title={`${req.allowed ? '✓' : '✗'} at ${req.timestamp.toFixed(1)}s`}
-                    />
-                  );
-                })}
+        {/* How it works Section */}
+        <div className="mb-8">
+          <h2 className="text-xl font-semibold mb-4">How it works</h2>
+          
+          {/* Token Bucket Algorithm */}
+          <div className="bg-[#1a1d24] rounded-xl border border-zinc-800 mb-3 overflow-hidden">
+            <button
+              onClick={() => setExpandedAlgorithm(expandedAlgorithm === 'token' ? null : 'token')}
+              className="w-full flex items-center justify-between px-6 py-4 hover:bg-zinc-800/30 transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <TokenIcon />
+                <span className="font-medium">Token Bucket Algorithm</span>
               </div>
-
-              {/* Current Time Indicator */}
-              <div
-                className="absolute top-0 bottom-0 w-0.5 bg-blue-500 transition-all"
-                style={{ left: `${windowEndPercent}%` }}
-              >
-                <div className="absolute top-2 -right-2 w-4 h-4 bg-blue-500 rounded-full animate-pulse" />
-              </div>
-            </div>
-
-            {/* Legend */}
-            <div className="grid grid-cols-3 gap-3 text-xs">
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                <span className="text-slate-600">Allowed</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-red-500" />
-                <span className="text-slate-600">Blocked</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-slate-300" />
-                <span className="text-slate-600">Expired</span>
-              </div>
-            </div>
-
-            {/* Instructions */}
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-slate-700">
-              <p className="font-medium text-blue-900 mb-1">💡 Try this:</p>
-              <p>
-                {mode === 'fixed'
-                  ? 'Send a burst, advance time by 30s, then burst again. See how the counter resets?'
-                  : 'Send a burst, advance time by 30s, then burst again. The window prevents the trick.'}
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* RIGHT PANEL - Insights */}
-        <div className="bg-white rounded-2xl shadow-sm p-6 border border-slate-200">
-          <h2 className="text-lg font-semibold text-slate-900 mb-6">Silent Teacher</h2>
-
-          <div className="space-y-6">
-            {/* Live Stats */}
-            <div className="space-y-3">
-              <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
-                <p className="text-xs text-slate-600 mb-1">Current Time</p>
-                <p className="text-2xl font-bold text-blue-600">{currentTime.toFixed(1)}s</p>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="bg-emerald-50 rounded-lg p-4 border border-emerald-200">
-                  <p className="text-xs text-slate-600 mb-1">Allowed</p>
-                  <p className="text-2xl font-bold text-emerald-600">{stats.allowed}</p>
-                </div>
-                <div className="bg-red-50 rounded-lg p-4 border border-red-200">
-                  <p className="text-xs text-slate-600 mb-1">Blocked</p>
-                  <p className="text-2xl font-bold text-red-600">{stats.blocked}</p>
-                </div>
-              </div>
-
-              <div className="bg-slate-100 rounded-lg p-4">
-                <p className="text-xs text-slate-600 mb-1">Total in Window</p>
-                <p className="text-2xl font-bold text-slate-900">
-                  {stats.requestsInWindow.length} / {maxRequests}
+              {expandedAlgorithm === 'token' ? <ChevronUpIcon /> : <ChevronDownIcon />}
+            </button>
+            {expandedAlgorithm === 'token' && (
+              <div className="px-6 pb-6 text-sm text-zinc-400">
+                <p className="mb-4">
+                  The Token Bucket algorithm is based on an analogy of a bucket filled with tokens at a constant rate. Each request consumes a token.
                 </p>
+                <ul className="space-y-2 list-disc list-inside">
+                  <li>A bucket holds a maximum of <span className="text-white font-medium">N</span> tokens.</li>
+                  <li>Tokens are added at a rate of <span className="text-white font-medium">R</span> tokens per second.</li>
+                  <li>If a request arrives and the bucket has tokens, one is removed and the request is <span className="text-green-400">Approved</span>.</li>
+                  <li>If the bucket is empty, the request is <span className="text-red-400">Rejected (429)</span>.</li>
+                </ul>
               </div>
-            </div>
+            )}
+          </div>
 
-            {/* Reactive Insight */}
-            <div className="bg-gradient-to-br from-amber-50 to-amber-100 border border-amber-300 rounded-lg p-4">
-              <p className="text-sm font-medium text-amber-900 leading-relaxed">{insight}</p>
-            </div>
-
-            {/* Algorithm Explanation */}
-            <div className="bg-slate-50 border border-slate-300 rounded-lg p-4 space-y-3">
-              <p className="text-xs font-semibold text-slate-900 uppercase tracking-wide">
-                {mode === 'fixed' ? 'Fixed Counter' : 'Sliding Window'}
-              </p>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                {mode === 'fixed'
-                  ? 'Resets every period. Bad actors wait for reset, then burst.'
-                  : 'Always tracks the last N seconds. Bursts never slip through.'}
-              </p>
-
-              {/* Comparison */}
-              <div className="text-xs space-y-1 pt-2 border-t border-slate-300">
-                <div className="flex justify-between">
-                  <span className="text-slate-600">Predictable</span>
-                  <span className="text-slate-900 font-medium">
-                    {mode === 'fixed' ? '❌' : '✓'}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">Exploitable</span>
-                  <span className="text-slate-900 font-medium">
-                    {mode === 'fixed' ? '✓' : '❌'}
-                  </span>
-                </div>
+          {/* Leaky Bucket Algorithm */}
+          <div className="bg-[#1a1d24] rounded-xl border border-zinc-800 overflow-hidden">
+            <button
+              onClick={() => setExpandedAlgorithm(expandedAlgorithm === 'leaky' ? null : 'leaky')}
+              className="w-full flex items-center justify-between px-6 py-4 hover:bg-zinc-800/30 transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <DropletIcon />
+                <span className="font-medium">Leaky Bucket Algorithm</span>
               </div>
-            </div>
+              {expandedAlgorithm === 'leaky' ? <ChevronUpIcon /> : <ChevronDownIcon />}
+            </button>
+            {expandedAlgorithm === 'leaky' && (
+              <div className="px-6 pb-6 text-sm text-zinc-400">
+                <p className="mb-4">
+                  The Leaky Bucket algorithm processes requests at a fixed rate, like water leaking from a bucket at a constant rate.
+                </p>
+                <ul className="space-y-2 list-disc list-inside">
+                  <li>Requests enter a queue (the bucket) with a fixed capacity.</li>
+                  <li>Requests are processed at a constant rate regardless of burst traffic.</li>
+                  <li>If the queue is full, new requests are <span className="text-red-400">Rejected (429)</span>.</li>
+                  <li>Provides smoother output rate compared to Token Bucket.</li>
+                </ul>
+              </div>
+            )}
           </div>
         </div>
-      </div>
-
-      {/* Footer */}
-      <div className="max-w-7xl mx-auto mt-12 text-center text-xs text-slate-500">
-        <p>Real-world rate limiting playground. No LeetCode. No blog. Just understanding.</p>
-      </div>
+      </main>
     </div>
   );
 }
